@@ -1,0 +1,24 @@
+name: Aggiorna Contatore Instagram
+
+on:
+  schedule:
+    - cron: '0 */3 * * *' # Si attiva automaticamente ogni 3 ore
+  workflow_dispatch: # Permette anche di avviarlo a mano per un test immediato
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+
+      - name: Configura Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Installa dipendenze
+        run: pip install requests
+
+      - name: Esegui lo script
+        run: python ig_scraper.py
