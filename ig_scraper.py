@@ -1,42 +1,58 @@
+import os
 import requests
-import json
-import re
 
-USERNAME = "prophetpublichouse.lecce"
+# Legge il token in sicurezza dalle variabili d'ambiente di GitHub Actions
+ACCESS_TOKEN = os.environ.get("META_TOKEN")
 NPOINT_URL = "https://api.npoint.io/4b40ba1379d34d30dd69"
 
-def fetch_instagram_followers():
-    url = f"https://www.instagram.com/{USERNAME}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+def get_instagram_followers():
+    if not ACCESS_TOKEN:
+        print("Errore: Token di Meta non trovato nelle variabili d'ambiente!")
+        return None, None
+        
+    print("1. Chiedo a Meta le pagine associate al Token...")
+    url_accounts = f"https://graph.facebook.com/v19.0/me/accounts?fields=id,name,instagram_business_account&access_token={ACCESS_TOKEN}"
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            # Cerchiamo il meta tag con la descrizione che di solito contiene i follower (es. "1,234 Followers")
-            match = re.search(r'"edge_followed_by":\{"count":(\d+)\}', response.text)
-            if match:
-                return int(match.group(1))
-            
-            # Secondo tentativo con i meta tag standard di condivisione
-            match_meta = re.search(r'content="(\d+[\d,]*)\s+Followers', response.text)
-            if match_meta:
-                clean_num = match_meta.group(1).replace(",", "").replace(".", "")
-                return int(clean_num)
-                
-    except Exception as e:
-        print(f"Errore durante lo scraping: {e}")
+        res = requests.get(url_accounts, timeout=10).json()
+        pages = res.get("data", [])
         
-    return None
+        ig_id = None
+        for page in pages:
+            if "instagram_business_account" in page:
+                ig_id = page["instagram_business_account"]["id"]
+                break
+                
+        if not ig_id:
+            print("Nessun account Instagram collegato.")
+            return None, None
 
-followers = fetch_instagram_followers()
+        # 2. Leggo i follower
+        url_followers = f"https://graph.facebook.com/v19.0/{ig_id}?fields=followers_count,username&access_token={ACCESS_TOKEN}"
+        final_res = requests.get(url_followers, timeout=10).json()
+        
+        if "followers_count" in final_res:
+            return final_res["username"], final_res["followers_count"]
+            
+    except Exception as e:
+        print(f"Errore HTTP Meta: {e}")
+        
+    return None, None
 
-if followers:
-    print(f"Trovati {followers} follower!")
-    payload = {"username": USERNAME, "followers": followers}
-    res = requests.put(NPOINT_URL, json=payload)
-    print(f"npoint.io aggiornato con successo! Status: {res.status_code}")
+username, followers = get_instagram_followers()
+
+if followers is not None:
+    print(f"\n--- ESITO META OK ---")
+    print(f"Account: @{username}")
+    print(f"Follower: {followers}")
+    
+    payload = {"username": username, "followers": followers}
+    headers = {"Content-Type": "application/json"}
+    
+    update_res = requests.post(NPOINT_URL, json=payload, headers=headers)
+    if update_res.status_code != 200:
+        update_res = requests.put(NPOINT_URL, json=payload, headers=headers)
+
+    print(f"Aggiornamento npoint.io -> Status Code: {update_res.status_code}")
 else:
-    print("Impossibile estrarre i follower direttamente, mantengo l'ultimo valore valido.")
+    print("\n--- TEST FALLITO ---")
