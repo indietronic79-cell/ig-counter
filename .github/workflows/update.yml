@@ -21,4 +21,6 @@ jobs:
         run: pip install requests
 
       - name: Esegui lo script
+        env:
+          META_TOKEN: ${{ secrets.META_TOKEN }}
         run: python ig_scraper.py
