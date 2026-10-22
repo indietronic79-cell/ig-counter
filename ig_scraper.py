@@ -2,7 +2,6 @@ import os
 import requests
 import json
 
-# Recupera il Token dall'ambiente
 META_TOKEN = os.environ.get("META_TOKEN")
 NPOINT_URL = "https://api.npoint.io/4b40ba1379d34d30dd69"
 
@@ -11,29 +10,30 @@ if not META_TOKEN:
     exit(1)
 
 def get_instagram_data():
-    print("1. Interrogo Meta API per Pagine, Follower e Tag...")
+    print("1. Recupero la pagina e l'Account Instagram Business collegato...")
     
-    # 1. Recupera la Pagina Facebook e l'Account Instagram Business collegato
-    me_url = f"https://graph.facebook.com/v19.0/me/accounts?access_token={META_TOKEN}"
+    # Chiediamo direttamente le pagine e l'account IG collegato
+    me_url = f"https://graph.facebook.com/v19.0/me/accounts?fields=id,name,instagram_business_account&access_token={META_TOKEN}"
     res = requests.get(me_url).json()
     
     if "data" not in res or not res["data"]:
-        print("Errore nel recupero della pagina:", res)
+        print("Errore nel recupero delle pagine:", res)
         exit(1)
         
-    page_id = res["data"][0]["id"]
-    
-    # 2. Ottieni l'ID Account Instagram Business
-    ig_acc_url = f"https://graph.facebook.com/v19.0/{page_id}?fields=instagram_business_account&access_token={META_TOKEN}"
-    res_ig = requests.get(ig_acc_url).json()
-    
-    if "instagram_business_account" not in res_ig:
-        print("Account Instagram Business non trovato:", res_ig)
+    ig_id = None
+    for page in res["data"]:
+        if "instagram_business_account" in page:
+            ig_id = page["instagram_business_account"]["id"]
+            break
+
+    if not ig_id:
+        print("Nessun Account Instagram Business collegato trovato nella Pagina Facebook!")
+        print("Risposta Meta:", res)
         exit(1)
-        
-    ig_id = res_ig["instagram_business_account"]["id"]
+
+    print(f"ID Instagram trovato: {ig_id}")
     
-    # 3. Chiedi Follower e Username
+    # 2. Ottieni Follower e Username
     profile_url = f"https://graph.facebook.com/v19.0/{ig_id}?fields=followers_count,username&access_token={META_TOKEN}"
     res_profile = requests.get(profile_url).json()
     
@@ -43,25 +43,28 @@ def get_instagram_data():
     print(f"--- ACCOUNT: @{username} ---")
     print(f"Follower attuali: {followers}")
     
-    # 4. Recupera gli ultimi Post in cui il Pub è stato taggato (Mentioned Media)
-    mentions_url = f"https://graph.facebook.com/v19.0/{ig_id}/tags?fields=id,caption,media_type,media_url,permalink,timestamp&limit=5&access_token={META_TOKEN}"
-    res_mentions = requests.get(mentions_url).json()
-    
+    # 3. Recupera gli ultimi Post in cui il Pub è stato taggato (Tags / Mentioned Media)
     mentions_list = []
-    if "data" in res_mentions:
-        for item in res_mentions["data"]:
-            mentions_list.append({
-                "id": item.get("id"),
-                "caption": item.get("caption", ""),
-                "media_type": item.get("media_type", "IMAGE"),
-                "media_url": item.get("media_url", ""),
-                "permalink": item.get("permalink", ""),
-                "timestamp": item.get("timestamp", "")
-            })
-    
+    try:
+        tags_url = f"https://graph.facebook.com/v19.0/{ig_id}/tags?fields=id,caption,media_type,media_url,permalink,timestamp&limit=5&access_token={META_TOKEN}"
+        res_tags = requests.get(tags_url).json()
+        
+        if "data" in res_tags:
+            for item in res_tags["data"]:
+                mentions_list.append({
+                    "id": item.get("id"),
+                    "caption": item.get("caption", ""),
+                    "media_type": item.get("media_type", "IMAGE"),
+                    "media_url": item.get("media_url", ""),
+                    "permalink": item.get("permalink", ""),
+                    "timestamp": item.get("timestamp", "")
+                })
+    except Exception as e:
+        print(f"Nota sulle menzioni: {e}")
+
     print(f"Menzioni/Tag trovati: {len(mentions_list)}")
     
-    # 5. Prepara il payload per npoint.io
+    # 4. Aggiorna npoint.io con i dati completi
     payload = {
         "account": f"@{username}",
         "followers": followers,
@@ -69,9 +72,9 @@ def get_instagram_data():
         "mentions": mentions_list
     }
     
-    # 6. Aggiorna npoint.io
     headers = {'Content-Type': 'application/json'}
     put_res = requests.post(NPOINT_URL, data=json.dumps(payload), headers=headers)
+    print(f"--- ESITO META OK ---")
     print(f"Aggiornamento npoint.io -> Status Code: {put_res.status_code}")
 
 if __name__ == "__main__":
