@@ -1,41 +1,42 @@
 import requests
 import json
+import re
 
 USERNAME = "prophetpublichouse.lecce"
 NPOINT_URL = "https://api.npoint.io/4b40ba1379d34d30dd69"
 
-def get_followers():
-    # Metodo 1: API pubblica tramite proxy di servizio social
+def fetch_instagram_followers():
+    url = f"https://www.instagram.com/{USERNAME}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    
     try:
-        url = f"https://api.baskadia.com/instagram/{USERNAME}" # o servizio analogo
-        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        if "followers" in data:
-            return data["followers"]
+        if response.status_code == 200:
+            # Cerchiamo il meta tag con la descrizione che di solito contiene i follower (es. "1,234 Followers")
+            match = re.search(r'"edge_followed_by":\{"count":(\d+)\}', response.text)
+            if match:
+                return int(match.group(1))
+            
+            # Secondo tentativo con i meta tag standard di condivisione
+            match_meta = re.search(r'content="(\d+[\d,]*)\s+Followers', response.text)
+            if match_meta:
+                clean_num = match_meta.group(1).replace(",", "").replace(".", "")
+                return int(clean_num)
+                
     except Exception as e:
-        print(f"Metodo 1 fallito: {e}")
-
-    # Metodo 2: Fetch tramite un micro-service API libero (Fallback)
-    try:
-        url = f"https://instagram-follower-count.vercel.app/api/followers?username={USERNAME}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if "followers" in data:
-            return data["followers"]
-    except Exception as e:
-        print(f"Metodo 2 fallito: {e}")
-
+        print(f"Errore durante lo scraping: {e}")
+        
     return None
 
-followers = get_followers()
+followers = fetch_instagram_followers()
 
 if followers:
-    print(f"Follower trovati: {followers}")
-    payload = {"username": USERNAME, "followers": int(followers)}
-    
-    # Aggiorna npoint.io
+    print(f"Trovati {followers} follower!")
+    payload = {"username": USERNAME, "followers": followers}
     res = requests.put(NPOINT_URL, json=payload)
-    print(f"Stato aggiornamento npoint: {res.status_code}")
+    print(f"npoint.io aggiornato con successo! Status: {res.status_code}")
 else:
-    print("Impossibile recuperare i follower al momento.")
+    print("Impossibile estrarre i follower direttamente, mantengo l'ultimo valore valido.")
