@@ -1,179 +1,52 @@
 import os
-import sys
-import logging
-from typing import Optional, Dict, Any
 import requests
 
-# ---------------------------------------------------------------------------
-# Logging Configuration
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger("IGScraper")
+# Token salvato nei Secret di GitHub
+PAGE_TOKEN = os.getenv("FB_PAGE_TOKEN")
+PAGE_ID = "167069679971123"
 
-# ---------------------------------------------------------------------------
-# Constants & Environment Configuration
-# ---------------------------------------------------------------------------
-META_TOKEN = os.getenv("META_TOKEN")
-JSON_BIN_URL = os.getenv("JSON_BIN_URL")
+# URL del tuo bin npoint.io estratto dallo script del Raspberry
+NPOINT_URL = "https://api.npoint.io/4b40ba1379d34d30dd69"
 
-API_VERSION = "v18.0"
-GRAPH_BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
-HTTP_TIMEOUT = 10  # Seconds
+def get_instagram_followers():
+    if not PAGE_TOKEN:
+        raise ValueError("FB_PAGE_TOKEN non trovato nei Secret di GitHub.")
 
-
-# ---------------------------------------------------------------------------
-# Session Management & Helper Functions
-# ---------------------------------------------------------------------------
-def create_authenticated_session(token: str) -> requests.Session:
-    """Creates and configures a requests.Session with standard Bearer authentication headers."""
-    session = requests.Session()
-    session.headers.update({
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json"
-    })
-    return session
-
-
-def extract_ig_id(data: Dict[str, Any]) -> Optional[str]:
-    """Safely extracts the Instagram Business account ID from a Meta Graph API response dictionary."""
-    if not isinstance(data, dict):
-        return None
+    # Recupera i dati da Meta Graph API
+    url = f"https://graph.facebook.com/v20.0/{PAGE_ID}"
+    params = {
+        "fields": "instagram_business_account{followers_count,username}",
+        "access_token": PAGE_TOKEN
+    }
     
-    # 1. Standard nested structure check (e.g., from /me/accounts)
-    ig_account = data.get("instagram_business_account")
-    if isinstance(ig_account, dict) and "id" in ig_account:
-        return ig_account["id"]
-        
-    # 2. Direct resource node check
-    if data.get("id") and "followers_count" in data:
-        return data["id"]
+    response = requests.get(url, params=params)
+    data = response.json()
+    
+    if "instagram_business_account" in data:
+        followers = data["instagram_business_account"].get("followers_count", 0)
+        username = data["instagram_business_account"].get("username", "prophetpublichouse.lecce")
+        print(f"Follower trovati per {username}: {followers}")
+        return followers
+    else:
+        raise Exception(f"Errore nella lettura dell'account Instagram: {data}")
 
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Core Logic: Instagram Account Resolution & Data Retrieval
-# ---------------------------------------------------------------------------
-def fetch_instagram_business_id(session: requests.Session) -> str:
-    """Resolves the Instagram Business account ID using multiple fallback strategies
-
-    to support User Tokens, Page Tokens, and System User tokens.
-    """
-    # Strategy 1: Endpoint /me/accounts (Standard User/System User tokens with page permissions)
-    try:
-        response = session.get(
-            f"{GRAPH_BASE_URL}/me/accounts",
-            params={"fields": "instagram_business_account,name"},
-            timeout=HTTP_TIMEOUT
-        ).json()
-        
-        if "data" in response and isinstance(response["data"], list):
-            for page in response["data"]:
-                ig_id = extract_ig_id(page)
-                if ig_id:
-                    logger.info("Found IG business account linked to Facebook page: '%s'", page.get('name'))
-                    return ig_id
-    except requests.RequestException as e:
-        logger.warning("Attempt via /me/accounts failed: %s", e)
-
-    # Strategy 2: Direct /me endpoint (System User or direct resource token)
-    try:
-        response = session.get(
-            f"{GRAPH_BASE_URL}/me",
-            params={"fields": "id,name,instagram_business_account"},
-            timeout=HTTP_TIMEOUT
-        ).json()
-        
-        ig_id = extract_ig_id(response)
-        if ig_id:
-            logger.info("Found IG business account directly from main /me node ('%s')", response.get('name'))
-            return ig_id
-
-        # Strategy 3: Explicit query on the returned Page ID
-        if "id" in response:
-            page_id = response["id"]
-            page_res = session.get(
-                f"{GRAPH_BASE_URL}/{page_id}",
-                params={"fields": "instagram_business_account"},
-                timeout=HTTP_TIMEOUT
-            ).json()
-            
-            ig_id = extract_ig_id(page_res)
-            if ig_id:
-                logger.info("Found IG business account querying Page ID directly: %s", page_id)
-                return ig_id
-    except requests.RequestException as e:
-        logger.warning("Attempt via direct /me lookup failed: %s", e)
-
-    raise RuntimeError("No accessible Instagram professional account found using the provided token.")
-
-
-def push_to_remote_endpoint(session: requests.Session, target_url: str, followers: int) -> None:
-    """Sends the updated followers count to the configured remote storage endpoint."""
-    payload = {"followers": followers}
-    is_jsonbin = "jsonbin" in target_url
-
-    try:
-        if is_jsonbin:
-            res = session.post(target_url, json=payload, timeout=HTTP_TIMEOUT)
-        else:
-            res = session.put(target_url, json=payload, timeout=HTTP_TIMEOUT)
-
-        if res.status_code in (200, 201):
-            logger.info("Remote endpoint updated successfully (HTTP %d).", res.status_code)
-        else:
-            logger.warning("Unexpected status code from remote endpoint: HTTP %d - %s", res.status_code, res.text)
-    except requests.RequestException as e:
-        logger.error("Failed to update remote endpoint: %s", e)
-
-
-# ---------------------------------------------------------------------------
-# Main Entry Point
-# ---------------------------------------------------------------------------
-def main() -> None:
-    if not META_TOKEN:
-        logger.critical("Configuration error: META_TOKEN environment variable is not set.")
-        sys.exit(1)
-
-    session = create_authenticated_session(META_TOKEN)
-
-    try:
-        logger.info("Starting Instagram metrics retrieval process...")
-        ig_id = fetch_instagram_business_id(session)
-
-        # Retrieve profile metrics (followers and username)
-        profile_res = session.get(
-            f"{GRAPH_BASE_URL}/{ig_id}",
-            params={"fields": "followers_count,username"},
-            timeout=HTTP_TIMEOUT
-        ).json()
-
-        if "error" in profile_res:
-            error_msg = profile_res["error"].get("message", "Unknown Meta API Error")
-            raise RuntimeError(f"Meta Graph API Error: {error_msg}")
-
-        followers = profile_res.get("followers_count")
-        username = profile_res.get("username", "unknown")
-
-        if followers is None:
-            raise ValueError("The 'followers_count' field was not returned by the API.")
-
-        logger.info("Successfully fetched data for @%s (ID: %s) -> Current followers: %d", username, ig_id, followers)
-
-        # Synchronize with remote endpoint if available
-        if JSON_BIN_URL:
-            push_to_remote_endpoint(session, JSON_BIN_URL, followers)
-        else:
-            logger.info("JSON_BIN_URL is not set. Skipping remote synchronization.")
-
-    except Exception as err:
-        logger.error("Execution failed: %s", err)
-        sys.exit(1)
-
+def update_npoint(followers_count):
+    payload = {
+        "followers": followers_count
+    }
+    
+    # Aggiorna il JSON del bin su npoint.io
+    response = requests.post(NPOINT_URL, json=payload, timeout=10)
+    
+    if response.status_code == 200:
+        print(f"npoint.io aggiornato con successo a {followers_count} follower!")
+    else:
+        print(f"Errore aggiornamento npoint.io ({response.status_code}): {response.text}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        count = get_instagram_followers()
+        update_npoint(count)
+    except Exception as e:
+        print(f"Errore durante l'esecuzione: {e}")
+        exit(1)
