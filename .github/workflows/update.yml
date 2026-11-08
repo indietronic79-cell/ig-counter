@@ -39,5 +39,5 @@ jobs:
 
       - name: Aggiorna dati Instagram
         env:
-          FB_PAGE_TOKEN: ${{ secrets.META_TOKEN }}
-        run: python ig_scraper.py
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        run: python ig_scraper.py 
