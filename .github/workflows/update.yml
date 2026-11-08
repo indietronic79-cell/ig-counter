@@ -1,4 +1,3 @@
-
 name: Aggiorna Contatore Instagram
 
 on:
@@ -40,5 +39,5 @@ jobs:
 
       - name: Aggiorna dati Instagram
         env:
-          META_TOKEN: ${{ secrets.META_TOKEN }}
+          FB_PAGE_TOKEN: ${{ secrets.META_TOKEN }}
         run: python ig_scraper.py
