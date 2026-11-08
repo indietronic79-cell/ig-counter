@@ -1,305 +1,179 @@
-
 import os
 import sys
 import logging
+from typing import Optional, Dict, Any
 import requests
 
-# ============================================================
-# CONFIGURAZIONE
-# ============================================================
-
-META_TOKEN = os.environ.get("META_TOKEN")
-
-# Endpoint npoint già utilizzato dal Raspberry Pi
-NPOINT_URL = "https://api.npoint.io/4b40ba1379d34d30dd69"
-
-# Versione Graph API configurabile tramite variabile d'ambiente
-GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v25.0")
-BASE_URL = f"https://graph.facebook.com/{GRAPH_VERSION}"
-
-REQUEST_TIMEOUT = 20
-USER_AGENT = "InstagramCounter/3.0"
-
+# ---------------------------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
+logger = logging.getLogger("IGScraper")
 
-session = requests.Session()
-session.headers.update({"User-Agent": USER_AGENT})
+# ---------------------------------------------------------------------------
+# Constants & Environment Configuration
+# ---------------------------------------------------------------------------
+META_TOKEN = os.getenv("META_TOKEN")
+JSON_BIN_URL = os.getenv("JSON_BIN_URL")
+
+API_VERSION = "v18.0"
+GRAPH_BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
+HTTP_TIMEOUT = 10  # Seconds
 
 
-# ============================================================
-# RICHIESTE HTTP E GESTIONE ERRORI
-# ============================================================
+# ---------------------------------------------------------------------------
+# Session Management & Helper Functions
+# ---------------------------------------------------------------------------
+def create_authenticated_session(token: str) -> requests.Session:
+    """Creates and configures a requests.Session with standard Bearer authentication headers."""
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    })
+    return session
 
-def graph_get(path, params=None):
-    """Esegue una richiesta Meta e restituisce errori dettagliati."""
 
-    if not META_TOKEN:
-        raise RuntimeError("Secret META_TOKEN mancante")
-
-    response = session.get(
-        f"{BASE_URL}/{path.lstrip('/')}",
-        params={
-            **(params or {}),
-            "access_token": META_TOKEN
-        },
-        timeout=REQUEST_TIMEOUT
-    )
-
-    try:
-        data = response.json()
-    except ValueError:
-        data = {}
-
-    if not response.ok:
-        error = data.get("error", {})
-        message = error.get("message", response.reason)
-        code = error.get("code", "N/D")
-        subcode = error.get("error_subcode", "N/D")
-
-        # Non registrare mai il token nei log.
-        raise RuntimeError(
-            f"Meta API HTTP {response.status_code}; "
-            f"code={code}; subcode={subcode}: {message}"
-        )
-
+def extract_ig_id(data: Dict[str, Any]) -> Optional[str]:
+    """Safely extracts the Instagram Business account ID from a Meta Graph API response dictionary."""
     if not isinstance(data, dict):
-        raise RuntimeError("Risposta Meta non valida: JSON inatteso")
-
-    if "error" in data:
-        error = data["error"]
-        raise RuntimeError(
-            f"Meta API error {error.get('code', 'N/D')}: "
-            f"{error.get('message', 'Errore sconosciuto')}"
-        )
-
-    return data
-
-
-# ============================================================
-# RECUPERO ACCOUNT INSTAGRAM
-# ============================================================
-
-def trova_account_instagram():
-    """Trova un account Instagram professionale accessibile."""
-
-    logging.info("Recupero pagine Facebook e account Instagram")
-
-    pages_data = graph_get(
-        "me/accounts",
-        {
-            "fields": "id,name,instagram_business_account",
-            "limit": 100
-        }
-    )
-
-    pages = pages_data.get("data", [])
-
-    if not isinstance(pages, list):
-        raise RuntimeError("Elenco pagine Facebook non valido")
-
-    for page in pages:
-        instagram = page.get("instagram_business_account")
-
-        if instagram and instagram.get("id"):
-            logging.info(
-                "Account Instagram trovato tramite una pagina accessibile"
-            )
-            return instagram["id"]
-
-    raise RuntimeError(
-        "Nessun account Instagram professionale collegato "
-        "alle pagine accessibili dal token"
-    )
-
-
-# ============================================================
-# RECUPERO CONTENUTI TAGGATI
-# ============================================================
-
-def recupera_contenuti_tagged(ig_id):
-    """
-    Recupera i media taggati accessibili tramite /tags.
-
-    Non rappresenta il totale di tutte le menzioni Instagram.
-    Se il recupero fallisce, restituisce None per distinguere
-    un errore da un elenco effettivamente vuoto.
-    """
-
-    try:
-        result = graph_get(
-            f"{ig_id}/tags",
-            {
-                "fields": (
-                    "id,caption,media_type,media_url,"
-                    "permalink,timestamp"
-                ),
-                "limit": 5
-            }
-        )
-
-        items = result.get("data", [])
-
-        if not isinstance(items, list):
-            raise RuntimeError("Elenco dei contenuti taggati non valido")
-
-        mentions = []
-
-        for item in items:
-            mentions.append({
-                "id": item.get("id"),
-                "caption": item.get("caption") or "",
-                "media_type": item.get("media_type") or "IMAGE",
-                "media_url": item.get("media_url") or "",
-                "permalink": item.get("permalink") or "",
-                "timestamp": item.get("timestamp") or ""
-            })
-
-        logging.info(
-            "Contenuti taggati recuperati: %s",
-            len(mentions)
-        )
-
-        return mentions
-
-    except (
-        requests.RequestException,
-        RuntimeError,
-        ValueError
-    ) as exc:
-        logging.warning(
-            "Recupero contenuti taggati non riuscito: %s",
-            exc
-        )
         return None
+    
+    # 1. Standard nested structure check (e.g., from /me/accounts)
+    ig_account = data.get("instagram_business_account")
+    if isinstance(ig_account, dict) and "id" in ig_account:
+        return ig_account["id"]
+        
+    # 2. Direct resource node check
+    if data.get("id") and "followers_count" in data:
+        return data["id"]
+
+    return None
 
 
-# ============================================================
-# AGGIORNAMENTO NPOINT
-# ============================================================
+# ---------------------------------------------------------------------------
+# Core Logic: Instagram Account Resolution & Data Retrieval
+# ---------------------------------------------------------------------------
+def fetch_instagram_business_id(session: requests.Session) -> str:
+    """Resolves the Instagram Business account ID using multiple fallback strategies
 
-def aggiorna_npoint(payload):
-    """Pubblica i dati su npoint e verifica la risposta HTTP."""
+    to support User Tokens, Page Tokens, and System User tokens.
+    """
+    # Strategy 1: Endpoint /me/accounts (Standard User/System User tokens with page permissions)
+    try:
+        response = session.get(
+            f"{GRAPH_BASE_URL}/me/accounts",
+            params={"fields": "instagram_business_account,name"},
+            timeout=HTTP_TIMEOUT
+        ).json()
+        
+        if "data" in response and isinstance(response["data"], list):
+            for page in response["data"]:
+                ig_id = extract_ig_id(page)
+                if ig_id:
+                    logger.info("Found IG business account linked to Facebook page: '%s'", page.get('name'))
+                    return ig_id
+    except requests.RequestException as e:
+        logger.warning("Attempt via /me/accounts failed: %s", e)
 
-    response = session.post(
-        NPOINT_URL,
-        json=payload,
-        headers={"Content-Type": "application/json"},
-        timeout=REQUEST_TIMEOUT
-    )
+    # Strategy 2: Direct /me endpoint (System User or direct resource token)
+    try:
+        response = session.get(
+            f"{GRAPH_BASE_URL}/me",
+            params={"fields": "id,name,instagram_business_account"},
+            timeout=HTTP_TIMEOUT
+        ).json()
+        
+        ig_id = extract_ig_id(response)
+        if ig_id:
+            logger.info("Found IG business account directly from main /me node ('%s')", response.get('name'))
+            return ig_id
 
-    if not response.ok:
-        raise RuntimeError(
-            f"Aggiornamento npoint fallito: HTTP "
-            f"{response.status_code}"
-        )
+        # Strategy 3: Explicit query on the returned Page ID
+        if "id" in response:
+            page_id = response["id"]
+            page_res = session.get(
+                f"{GRAPH_BASE_URL}/{page_id}",
+                params={"fields": "instagram_business_account"},
+                timeout=HTTP_TIMEOUT
+            ).json()
+            
+            ig_id = extract_ig_id(page_res)
+            if ig_id:
+                logger.info("Found IG business account querying Page ID directly: %s", page_id)
+                return ig_id
+    except requests.RequestException as e:
+        logger.warning("Attempt via direct /me lookup failed: %s", e)
 
-    logging.info(
-        "Aggiornamento npoint completato: HTTP %s",
-        response.status_code
-    )
+    raise RuntimeError("No accessible Instagram professional account found using the provided token.")
 
 
-# ============================================================
-# PROCEDURA PRINCIPALE
-# ============================================================
+def push_to_remote_endpoint(session: requests.Session, target_url: str, followers: int) -> None:
+    """Sends the updated followers count to the configured remote storage endpoint."""
+    payload = {"followers": followers}
+    is_jsonbin = "jsonbin" in target_url
 
-def get_instagram_data():
+    try:
+        if is_jsonbin:
+            res = session.post(target_url, json=payload, timeout=HTTP_TIMEOUT)
+        else:
+            res = session.put(target_url, json=payload, timeout=HTTP_TIMEOUT)
+
+        if res.status_code in (200, 201):
+            logger.info("Remote endpoint updated successfully (HTTP %d).", res.status_code)
+        else:
+            logger.warning("Unexpected status code from remote endpoint: HTTP %d - %s", res.status_code, res.text)
+    except requests.RequestException as e:
+        logger.error("Failed to update remote endpoint: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Main Entry Point
+# ---------------------------------------------------------------------------
+def main() -> None:
     if not META_TOKEN:
-        raise RuntimeError("Secret META_TOKEN mancante")
-
-    ig_id = trova_account_instagram()
-
-    profile = graph_get(
-        ig_id,
-        {"fields": "followers_count,username"}
-    )
-
-    if "followers_count" not in profile:
-        raise RuntimeError(
-            "followers_count assente nella risposta Meta"
-        )
-
-    followers_raw = profile["followers_count"]
-
-    if isinstance(followers_raw, bool):
-        raise RuntimeError("followers_count non valido")
-
-    try:
-        followers = int(followers_raw)
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("followers_count non numerico") from exc
-
-    username = profile.get("username")
-
-    if followers < 0 or not isinstance(username, str) or not username.strip():
-        raise RuntimeError("Profilo Instagram incompleto o non valido")
-
-    logging.info(
-        "Profilo @%s: %s follower",
-        username,
-        followers
-    )
-
-    mentions = recupera_contenuti_tagged(ig_id)
-
-    # Non sovrascrivere dati precedenti con un falso zero
-    # se il recupero dei contenuti taggati fallisce.
-    if mentions is None:
-        logging.warning(
-            "Aggiornamento follower mantenuto; "
-            "dati dei tag precedenti da preservare"
-        )
-
-        # Legge il documento esistente per preservare i tag.
-        try:
-            existing_response = session.get(
-                NPOINT_URL,
-                timeout=REQUEST_TIMEOUT
-            )
-            existing_response.raise_for_status()
-            existing_data = existing_response.json()
-
-            if not isinstance(existing_data, dict):
-                raise ValueError("JSON npoint non valido")
-
-            mentions = existing_data.get("mentions", [])
-
-            if not isinstance(mentions, list):
-                mentions = []
-
-        except (
-            requests.RequestException,
-            ValueError
-        ) as exc:
-            raise RuntimeError(
-                "Impossibile preservare i dati dei tag esistenti: "
-                f"{exc}"
-            ) from exc
-
-    payload = {
-        "account": f"@{username}",
-        "followers": followers,
-        "mentions_count": len(mentions),
-        "mentions": mentions
-    }
-
-    aggiorna_npoint(payload)
-
-
-# ============================================================
-# AVVIO
-# ============================================================
-
-if __name__ == "__main__":
-    try:
-        get_instagram_data()
-
-    except Exception as exc:
-        logging.error("%s", exc)
+        logger.critical("Configuration error: META_TOKEN environment variable is not set.")
         sys.exit(1)
 
-    finally:
-        session.close()
+    session = create_authenticated_session(META_TOKEN)
+
+    try:
+        logger.info("Starting Instagram metrics retrieval process...")
+        ig_id = fetch_instagram_business_id(session)
+
+        # Retrieve profile metrics (followers and username)
+        profile_res = session.get(
+            f"{GRAPH_BASE_URL}/{ig_id}",
+            params={"fields": "followers_count,username"},
+            timeout=HTTP_TIMEOUT
+        ).json()
+
+        if "error" in profile_res:
+            error_msg = profile_res["error"].get("message", "Unknown Meta API Error")
+            raise RuntimeError(f"Meta Graph API Error: {error_msg}")
+
+        followers = profile_res.get("followers_count")
+        username = profile_res.get("username", "unknown")
+
+        if followers is None:
+            raise ValueError("The 'followers_count' field was not returned by the API.")
+
+        logger.info("Successfully fetched data for @%s (ID: %s) -> Current followers: %d", username, ig_id, followers)
+
+        # Synchronize with remote endpoint if available
+        if JSON_BIN_URL:
+            push_to_remote_endpoint(session, JSON_BIN_URL, followers)
+        else:
+            logger.info("JSON_BIN_URL is not set. Skipping remote synchronization.")
+
+    except Exception as err:
+        logger.error("Execution failed: %s", err)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
